@@ -1,0 +1,294 @@
+{
+  "id": "EW8T2Fnr78UTfydm",
+  "name": "AntiGolpe - WhatsApp",
+  "active": false,
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "antigolpe",
+        "options": {}
+      },
+      "id": "a1000001-0000-4000-8000-000000000001",
+      "name": "Webhook Evolution API",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [0, 0],
+      "webhookId": "5c64b24a-04bd-4542-83bd-57a123a3d106"
+    },
+    {
+      "parameters": {
+        "jsCode": "const validItems = $input.all().filter(item => {\n  const data = item.json?.body?.data || {};\n  const key = data.key || {};\n  const message = data.message || {};\n\n  const isEcho = key.fromMe === true;\n  const remoteJid = key.remoteJid || '';\n  const isGroup = remoteJid.endsWith('@g.us');\n  const isStatus = remoteJid === 'status@broadcast';\n\n  const hasText = !!(message.conversation || message.extendedTextMessage?.text);\n  const hasImage = !!message.imageMessage;\n  const hasAudio = !!message.audioMessage;\n  const hasSupportedContent = hasText || hasImage || hasAudio;\n\n  return !isEcho && !isGroup && !isStatus && hasSupportedContent;\n});\n\nreturn validItems;"
+      },
+      "id": "a1000002-0000-4000-8000-000000000002",
+      "name": "Filtro - Validar Mensagem",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [224, 0]
+    },
+    {
+      "parameters": {
+        "jsCode": "const data = $json.body.data;\nconst key = data.key || {};\nconst message = data.message || {};\n\nconst numero = (key.remoteJid || '').split('@')[0];\nconst nome = data.pushName || '';\n\nlet tipo_mensagem = null;\nlet texto = '';\nlet legenda = '';\nlet mimetype = null;\n\nif (message.conversation || message.extendedTextMessage?.text) {\n  tipo_mensagem = 'texto';\n  texto = message.conversation || message.extendedTextMessage.text;\n} else if (message.imageMessage) {\n  tipo_mensagem = 'imagem';\n  mimetype = (message.imageMessage.mimetype || 'image/jpeg').split(';')[0];\n  // Legenda que o usuario escreveu junto com a foto (ex: \"essa imagem e real?\") .\n  // Sem isso, o Gemini so ve a imagem pura, sem saber o que a pessoa esta perguntando.\n  legenda = message.imageMessage.caption || '';\n} else if (message.audioMessage) {\n  tipo_mensagem = 'audio';\n  mimetype = (message.audioMessage.mimetype || 'audio/ogg').split(';')[0];\n}\n\n// Corpo pronto para a chamada POST /chat/getBase64FromMediaMessage da Evolution API,\n// usado so quando tipo_mensagem for imagem/audio (montado aqui, em JS puro, para nao\n// depender do parser de expressao do n8n com objetos aninhados).\nconst mediaFetchBody = {\n  message: { key, message },\n  convertToMp4: false\n};\n\nreturn [{\n  json: {\n    numero,\n    nome,\n    tipo_mensagem,\n    texto,\n    legenda,\n    mimetype,\n    mediaFetchBody\n  }\n}];"
+      },
+      "id": "a1000003-0000-4000-8000-000000000003",
+      "name": "Extracao - Dados e Tipo",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [448, 0]
+    },
+    {
+      "id": "a1000004-0000-4000-8000-000000000004",
+      "name": "E Texto?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [672, 0],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "version": 2,
+            "leftValue": "",
+            "caseSensitive": true,
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "a1000004-1111-4000-8000-000000000005",
+              "leftValue": "={{ $json.tipo_mensagem }}",
+              "rightValue": "texto",
+              "operator": { "type": "string", "operation": "equals" }
+            }
+          ],
+          "combinator": "and"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=http://evolution-api:8080/chat/getBase64FromMediaMessage/machen-atendimento",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ $json.mediaFetchBody }}",
+        "options": { "timeout": 30000 }
+      },
+      "id": "a1000005-0000-4000-8000-000000000006",
+      "name": "Buscar Midia Base64",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [896, 128],
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 3000,
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "C9CSIEAuFeK4qAj6",
+          "name": "Evolution API - Machen"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Reconstroi o item com os dados extraidos originalmente + o base64 obtido da Evolution API.\nconst extraido = $('Extracao - Dados e Tipo').item.json;\nconst resposta = $json;\n\n// A Evolution API pode devolver um `mimetype` proprio na resposta (varia por versao),\n// mas ele vem sem sanitizar (ex: \"audio/ogg; codecs=opus\"), e a API do Gemini rejeita\n// mimeType com esse sufixo de codec. Sempre limpamos aqui, seja o valor vindo da\n// resposta ou o ja detectado na extracao (fallback).\nconst mimetypeBruto = resposta.mimetype || extraido.mimetype || '';\nconst mimetype = mimetypeBruto.split(';')[0].trim();\n\nreturn [{\n  json: {\n    numero: extraido.numero,\n    nome: extraido.nome,\n    tipo_mensagem: extraido.tipo_mensagem,\n    texto: '',\n    legenda: extraido.legenda || '',\n    mimetype,\n    base64: resposta.base64\n  }\n}];"
+      },
+      "id": "a1000006-0000-4000-8000-000000000007",
+      "name": "Normalizar Midia",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1120, 128]
+    },
+    {
+      "parameters": { "mode": "append" },
+      "id": "a1000007-0000-4000-8000-000000000008",
+      "name": "Unir Branches",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [1344, 0]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Monta o array `parts` (texto ou midia em base64) e o corpo completo da chamada\n// ao Gemini. Feito inteiramente em JS (Code node) em vez de na expressao do node\n// HTTP Request seguinte, porque o parser de expressao do n8n nao lida bem com\n// objetos JSON grandes/aninhados escritos diretamente no campo do node.\nconst item = $json;\nlet parts;\n\nif (item.tipo_mensagem === 'texto') {\n  parts = [{ text: `Mensagem recebida do usuario para analise:\\n\\n${item.texto}` }];\n} else if (item.tipo_mensagem === 'imagem') {\n  const legendaTexto = item.legenda\n    ? `O usuario escreveu esta legenda/pergunta junto com a foto: \"${item.legenda}\"`\n    : 'O usuario nao escreveu nenhuma legenda ou pergunta junto com a foto.';\n  parts = [\n    { text: `O usuario enviou este print de tela ou foto para analise. ${legendaTexto} Descreva o que ve (remetente, valores, links, layout, pessoas, contexto do evento) e classifique - considere tambem se pode ser uma imagem tirada de contexto, montada ou usada para espalhar informacao falsa.` },\n    { inlineData: { mimeType: item.mimetype || 'image/jpeg', data: item.base64 } }\n  ];\n} else {\n  parts = [\n    { text: 'O usuario enviou este audio com um relato falado para analise. Entenda o relato e classifique.' },\n    { inlineData: { mimeType: item.mimetype || 'audio/ogg', data: item.base64 } }\n  ];\n}\n\n// Fonte da verdade documentada e revisavel em prompts/antigolpe_system_prompt.md\n// (manter os dois em sincronia ao editar um dos dois).\nconst systemPrompt = 'Voce e um assistente especializado em ajudar pessoas idosas no Brasil a identificar golpes digitais E fake news/desinformacao recebidos por WhatsApp - mensagens de texto, prints de tela (cobrancas, conversas, anuncios, SMS, noticias, fotos), e audios com relatos falados pelo proprio usuario.\\n\\n' +\n  'Seu publico nao tem familiaridade tecnica. Muitos nunca ouviram termos como \"phishing\", \"engenharia social\" ou \"IA generativa\" - e nao devem precisar ouvir isso de voce. Voce nunca conversa como um robo nem como um especialista em seguranca; voce explica como uma pessoa de confianca explicaria para um familiar mais velho, com calma e sem alarmismo desnecessario. Voce NUNCA age sozinho no lugar do usuario (nao liga para bancos, nao clica em links, nao envia dinheiro) - sua unica funcao e analisar e explicar em linguagem simples.\\n\\n' +\n  'Quando receber uma IMAGEM (print de tela): descreva primeiro, para si mesmo, o que esta escrito e visivel (remetente, valores, links, botoes, layout) e so entao classifique com base nisso. Quando receber um AUDIO: entenda o relato da pessoa e classifique com base nele.\\n\\n' +\n  'CATEGORIAS A IDENTIFICAR - golpes financeiros E desinformacao/fake news (nao exaustiva, use julgamento para casos parecidos):\\n' +\n  '- Phishing: links encurtados ou com dominio estranho, urgencia artificial (\"sua conta sera bloqueada\"), pedido para \"confirmar dados\".\\n' +\n  '- Boleto falso/adulterado: codigo de barras nao confere com o valor, valor fora do padrao esperado, origem nao clara.\\n' +\n  '- Falsa promocao/premio: \"voce ganhou\", \"clique para resgatar\", sorteio que a pessoa nao lembra de ter participado, pedido de \"taxa\" para liberar premio.\\n' +\n  '- Golpe do parente/emergencia: pedido urgente de dinheiro (PIX, recarga, boleto) alegando ser filho(a)/neto(a)/parente em apuros, geralmente com pressa e numero novo/desconhecido.\\n' +\n  '- Golpe do PIX: chave PIX diferente da esperada, cobranca fora de contexto, pedido de PIX \"de teste\" ou \"para desbloquear conta\".\\n' +\n  '- Falso funcionario de banco/INSS/Correios: pedido de senha, codigo de verificacao (SMS/token), dados de cartao, ou instalacao de app de \"suporte remoto\" - instituicoes oficiais nunca pedem isso por telefone/WhatsApp.\\n' +\n  '- Fake news/desinformacao: fotos ou videos tirados de contexto (imagem real de um evento, mas legenda mentindo sobre quem/quando/o que aconteceu), montagens ou imagens editadas, boatos de saude (curas milagrosas, remedios falsos), boatos politicos, noticias inventadas se passando por veiculo de imprensa real, correntes de WhatsApp alarmistas sem fonte confiavel. Classifique como \"golpe\" (tipo_golpe \"fake_news\") quando a informacao for claramente falsa ou manipulada, e como \"suspeito\" quando parecer fora de contexto mas sem certeza suficiente para afirmar.\\n\\n' +\n  'NIVEL DE CONFIANCA - REGRA DE OURO: nunca afirme com certeza absoluta que algo e 100% seguro. Use \"alta\" quando os sinais forem claros e multiplos; \"media\" quando houver sinais de atencao mas nao for conclusivo; \"baixa\" quando faltar contexto para avaliar bem. Sempre que a confianca for \"baixa\" ou o conteudo for ambiguo, a classificacao NUNCA deve ser \"seguro\" sem ressalva - use \"suspeito\" ou \"indeterminado\", com recomendacao de cautela (confirmar por telefone oficial, nao clicar, pedir ajuda a alguem de confianca).\\n\\n' +\n  'Responda SEMPRE no formato JSON estruturado solicitado. Regras de conteudo para explicacao_simples e recomendacao: nunca usar as palavras \"phishing\", \"engenharia social\", \"IA\", \"inteligencia artificial\", \"algoritmo\" ou jargao tecnico equivalente; frases curtas, diretas, tom acolhedor, como alguem explicando para um familiar; recomendacao deve ser sempre uma acao concreta (ex: \"nao clique nesse link\", \"ligue para o banco pelo numero que esta no cartao, nunca pelo numero que te mandaram a mensagem\", \"confirme com a pessoa por uma ligacao de video antes de mandar qualquer dinheiro\", \"nao passe senha nem codigo de confirmacao para ninguem\", \"nao encaminhe essa foto/video para mais ninguem antes de confirmar se e verdade em um site de noticias confiavel\"). Quando classificacao for \"seguro\", ainda assim inclua uma recomendacao leve de bom senso.\\n\\n' +\n  'Voce nao tem acesso a internet nem consegue verificar links de verdade - avalie so pela aparencia/padrao, nunca confirme com certeza que um link especifico e seguro. Nunca invente detalhes que nao foram informados na mensagem. Se o conteudo nao tiver nada para analisar (ex: mensagem vazia ou pergunta generica sem anexo), responda classificacao \"indeterminado\", confianca \"baixa\", e peca para a pessoa encaminhar a mensagem, print ou audio original.';\n\nconst geminiBody = {\n  systemInstruction: { parts: [{ text: systemPrompt }] },\n  contents: [{ role: 'user', parts }],\n  generationConfig: {\n    temperature: 0.2,\n    responseMimeType: 'application/json',\n    responseSchema: {\n      type: 'OBJECT',\n      properties: {\n        classificacao: { type: 'STRING', enum: ['golpe', 'suspeito', 'seguro', 'indeterminado'] },\n        tipo_golpe: { type: 'STRING', enum: ['phishing', 'boleto_falso', 'falsa_promocao', 'golpe_parente', 'golpe_pix', 'falso_funcionario', 'fake_news', 'outro'], nullable: true },\n        confianca: { type: 'STRING', enum: ['alta', 'media', 'baixa'] },\n        explicacao_simples: { type: 'STRING' },\n        recomendacao: { type: 'STRING' }\n      },\n      required: ['classificacao', 'confianca', 'explicacao_simples', 'recomendacao']\n    }\n  }\n};\n\nreturn [{\n  json: {\n    numero: item.numero,\n    nome: item.nome,\n    tipo_mensagem: item.tipo_mensagem,\n    texto: item.texto,\n    geminiBody\n  }\n}];"
+      },
+      "id": "a1000008-0000-4000-8000-000000000009",
+      "name": "Montar Conteudo Gemini",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1568, 0]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpQueryAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ $json.geminiBody }}",
+        "options": { "timeout": 90000 }
+      },
+      "id": "a1000009-0000-4000-8000-00000000000a",
+      "name": "Classificar com Gemini",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [2016, 0],
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 3000,
+      "onError": "continueErrorOutput",
+      "credentials": {
+        "httpQueryAuth": {
+          "id": "u55nEiayGANNMlEe",
+          "name": "Query Auth account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// A resposta do Gemini vem em candidates[0].content.parts[0].text como uma STRING JSON\n// (porque pedimos responseMimeType: application/json). Fazemos o parse e aplicamos uma\n// rede de seguranca extra: nunca deixar sair \"seguro\" quando a confianca for \"baixa\".\nconst body = $json;\nconst raw = body?.candidates?.[0]?.content?.parts?.[0]?.text || '{}';\n\nlet parsed;\ntry {\n  parsed = JSON.parse(raw);\n} catch (e) {\n  parsed = {\n    classificacao: 'indeterminado',\n    tipo_golpe: null,\n    confianca: 'baixa',\n    explicacao_simples: 'Nao consegui analisar com certeza esse conteudo.',\n    recomendacao: 'Por seguranca, nao clique em nada nem passe nenhum dado ate confirmar por telefone.'\n  };\n}\n\n// Rede de seguranca: nunca \"seguro\" com confianca baixa.\nif (parsed.classificacao === 'seguro' && parsed.confianca === 'baixa') {\n  parsed.classificacao = 'suspeito';\n}\n\nconst origem = $('Montar Conteudo Gemini').item.json;\n\nreturn [{\n  json: {\n    numero: origem.numero,\n    nome: origem.nome,\n    tipo_mensagem: origem.tipo_mensagem,\n    texto: origem.texto,\n    classificacao: parsed.classificacao || 'indeterminado',\n    tipo_golpe: parsed.tipo_golpe || null,\n    confianca: parsed.confianca || 'baixa',\n    explicacao_simples: parsed.explicacao_simples || '',\n    recomendacao: parsed.recomendacao || ''\n  }\n}];"
+      },
+      "id": "a1000012-0000-4000-8000-00000000000d",
+      "name": "Parsear Classificacao",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2240, -96]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Chamada ao Gemini falhou (erro de rede, timeout, quota etc). Resposta cautelosa\n// por padrao: nunca dizer que esta tudo bem quando nao conseguimos nem analisar.\nconst origem = $('Montar Conteudo Gemini').item.json;\n\nreturn [{\n  json: {\n    numero: origem.numero,\n    nome: origem.nome,\n    tipo_mensagem: origem.tipo_mensagem,\n    texto: origem.texto,\n    classificacao: 'indeterminado',\n    tipo_golpe: null,\n    confianca: 'baixa',\n    explicacao_simples: 'Nao consegui analisar esse conteudo agora - pode ter sido um problema tecnico passageiro.',\n    recomendacao: 'Por seguranca, nao clique em nada, nao pague nada e nao passe nenhum dado ate confirmar diretamente por telefone com a instituicao ou pessoa envolvida. Pode me mandar de novo em alguns minutos.'\n  }\n}];"
+      },
+      "id": "a1000013-0000-4000-8000-00000000000e",
+      "name": "Fallback - Erro Gemini",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2240, 128]
+    },
+    {
+      "parameters": {
+        "jsCode": "// O hash do numero (SHA-256) e calculado depois, direto no SQL do node de log\n// (Postgres tem a funcao sha256() nativa desde a v11). O sandbox de execucao do\n// n8n (JS Task Runner) bloqueia require('crypto') e nao expoe Web Crypto global,\n// entao evitamos fazer hash aqui.\nconst item = $json;\n\nconst emojiPorClassificacao = {\n  golpe: '\\ud83d\\udea8',\n  suspeito: '\\u26a0\\ufe0f',\n  seguro: '\\u2705',\n  indeterminado: '\\ud83e\\udd14'\n};\nconst tituloPorClassificacao = {\n  golpe: 'Isso parece um GOLPE',\n  suspeito: 'Melhor ter cuidado com isso',\n  seguro: 'Nao encontrei sinais de golpe',\n  indeterminado: 'Nao consegui ter certeza'\n};\n\nconst emoji = emojiPorClassificacao[item.classificacao] || '\\ud83e\\udd14';\nconst titulo = tituloPorClassificacao[item.classificacao] || 'Nao consegui ter certeza';\n\nconst mensagem = `${emoji} *${titulo}*\\n\\n${item.explicacao_simples}\\n\\n\\ud83d\\udc49 ${item.recomendacao}\\n\\n_Mensagem automatica do AntiGolpe. Na duvida, sempre vale pedir ajuda a alguem de confianca._`;\n\n// Resumo curto do conteudo para o log (sem gravar o texto completo de audios/imagens,\n// so um trecho do texto quando for mensagem de texto).\nlet conteudo_resumido;\nif (item.tipo_mensagem === 'texto') {\n  conteudo_resumido = (item.texto || '').slice(0, 300);\n} else {\n  conteudo_resumido = `[${item.tipo_mensagem} recebido - conteudo nao textual]`;\n}\n\nreturn [{\n  json: {\n    numero: item.numero,\n    mensagem_final: mensagem,\n    tipo_mensagem: item.tipo_mensagem,\n    conteudo_resumido,\n    classificacao: item.classificacao,\n    tipo_golpe: item.tipo_golpe,\n    confianca: item.confianca,\n    explicacao_simples: item.explicacao_simples\n  }\n}];"
+      },
+      "id": "a1000014-0000-4000-8000-00000000000f",
+      "name": "Montar Mensagem WhatsApp",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2464, 0]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=http://evolution-api:8080/message/sendText/machen-atendimento",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { \"number\": $json.numero, \"text\": $json.mensagem_final } }}",
+        "options": { "timeout": 15000 }
+      },
+      "id": "a1000015-0000-4000-8000-000000000010",
+      "name": "Envio - Evolution API",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [2688, 0],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000,
+      "alwaysOutputData": true,
+      "onError": "continueErrorOutput",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "C9CSIEAuFeK4qAj6",
+          "name": "Evolution API - Machen"
+        }
+      }
+    },
+    {
+      "id": "a1000016-0000-4000-8000-000000000011",
+      "name": "Log - Antigolpe Interacoes",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [2912, -96],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO antigolpe_interacoes (telefone_hash, tipo_mensagem, conteudo_resumido, classificacao, tipo_golpe, confianca, explicacao)\nVALUES (encode(sha256($1::bytea), 'hex'), $2, $3, $4, $5, $6, $7);",
+        "options": {
+          "queryReplacement": "={{ [ $('Montar Mensagem WhatsApp').item.json.numero, $('Montar Mensagem WhatsApp').item.json.tipo_mensagem, $('Montar Mensagem WhatsApp').item.json.conteudo_resumido, $('Montar Mensagem WhatsApp').item.json.classificacao, $('Montar Mensagem WhatsApp').item.json.tipo_golpe, $('Montar Mensagem WhatsApp').item.json.confianca, $('Montar Mensagem WhatsApp').item.json.explicacao_simples ] }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": "NpFd8Wsxhcs56Q9H",
+          "name": "Postgres - n8n_prospecta"
+        }
+      },
+      "onError": "continueRegularOutput",
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {},
+      "id": "a1000017-0000-4000-8000-000000000012",
+      "name": "Log erro envio (basico)",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [2912, 128]
+    }
+  ],
+  "connections": {
+    "Webhook Evolution API": {
+      "main": [[{ "node": "Filtro - Validar Mensagem", "type": "main", "index": 0 }]]
+    },
+    "Filtro - Validar Mensagem": {
+      "main": [[{ "node": "Extracao - Dados e Tipo", "type": "main", "index": 0 }]]
+    },
+    "Extracao - Dados e Tipo": {
+      "main": [[{ "node": "E Texto?", "type": "main", "index": 0 }]]
+    },
+    "E Texto?": {
+      "main": [
+        [{ "node": "Unir Branches", "type": "main", "index": 0 }],
+        [{ "node": "Buscar Midia Base64", "type": "main", "index": 0 }]
+      ]
+    },
+    "Buscar Midia Base64": {
+      "main": [[{ "node": "Normalizar Midia", "type": "main", "index": 0 }]]
+    },
+    "Normalizar Midia": {
+      "main": [[{ "node": "Unir Branches", "type": "main", "index": 1 }]]
+    },
+    "Unir Branches": {
+      "main": [[{ "node": "Montar Conteudo Gemini", "type": "main", "index": 0 }]]
+    },
+    "Montar Conteudo Gemini": {
+      "main": [[{ "node": "Classificar com Gemini", "type": "main", "index": 0 }]]
+    },
+    "Classificar com Gemini": {
+      "main": [
+        [{ "node": "Parsear Classificacao", "type": "main", "index": 0 }],
+        [{ "node": "Fallback - Erro Gemini", "type": "main", "index": 0 }]
+      ]
+    },
+    "Parsear Classificacao": {
+      "main": [[{ "node": "Montar Mensagem WhatsApp", "type": "main", "index": 0 }]]
+    },
+    "Fallback - Erro Gemini": {
+      "main": [[{ "node": "Montar Mensagem WhatsApp", "type": "main", "index": 0 }]]
+    },
+    "Montar Mensagem WhatsApp": {
+      "main": [[{ "node": "Envio - Evolution API", "type": "main", "index": 0 }]]
+    },
+    "Envio - Evolution API": {
+      "main": [
+        [{ "node": "Log - Antigolpe Interacoes", "type": "main", "index": 0 }],
+        [{ "node": "Log erro envio (basico)", "type": "main", "index": 0 }]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "all",
+    "saveManualExecutions": true,
+    "saveExecutionProgress": true,
+    "binaryMode": "separate"
+  },
+  "pinData": {}
+}
